@@ -7,57 +7,44 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: shop.kastrodevops.link
-      http:
+    - http:
         paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: frontend-service
-              port:
-                number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
 
-    - host: users.kastrodevops.link
-      http:
-        paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: users-service
-              port:
-                number: 80
+          - path: /users
+            pathType: Prefix
+            backend:
+              service:
+                name: users-service
+                port:
+                  number: 80
 
-    - host: cart.kastrodevops.link
-      http:
-        paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: cart-service
-              port:
-                number: 80
+          - path: /cart
+            pathType: Prefix
+            backend:
+              service:
+                name: cart-service
+                port:
+                  number: 80
 
-    - host: shipping.kastrodevops.link
-      http:
-        paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: shipping-service
-              port:
-                number: 80
+          - path: /shipping
+            pathType: Prefix
+            backend:
+              service:
+                name: shipping-service
+                port:
+                  number: 80
 
-    - host: payment.kastrodevops.link
-      http:
-        paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: payment-service
-              port:
-                number: 80
+          - path: /payment
+            pathType: Prefix
+            backend:
+              service:
+                name: payment-service
+                port:
+                  number: 80
