@@ -1,0 +1,424 @@
+Deployment of 5 Microservices Application using AWS Load Balancer Controller + Custom Sub-Domain Based Routing + DB Included (Tested 16-04-2026)
+===============================================================================================
+Everything is working in this document
+
+Repo URL:
+https://github.com/KastroVKiran/ecommerce-k8s.git
+
+****************************
+Phase 1: Without Jenkins
+****************************
+==> Setup Cluster like in JDKT Batches
+
+==> Install Docker 
+apt install docker.io -y
+
+==> Clone the Repo to EKS Client VM
+https://github.com/KastroVKiran/ecommerce-k8s.git
+
+==> Installation of EBS CSI Drivers
+IAM Requirement for Worker Nodes:
+	Attach "AmazonEBSCSIDriverPolicy" to the IAM Role of Worker Nodes
+
+EKSCTL doesn't know which region to use. Set the region explicitly
+	eksctl utils associate-iam-oidc-provider --cluster kastro-cluster --region ap-south-1 --approve
+
+Check if the EBS CSI driver pods are running or not
+	kubectl get pods -n kube-system | grep ebs-csi
+	You will not see any pods
+
+==> Installation of HELM
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+
+==> Installation of EBS CSI Driver using HELM
+helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+helm repo update
+helm repo list
+
+Install EBS CSI driver
+helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
+    --namespace kube-system \
+    --create-namespace \
+    --set image.repository=602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/aws-ebs-csi-driver
+
+Verify installation
+kubectl get pods -n kube-system | grep ebs-csi
+#You should see controller and node pods in Running state. Wait for a minute, if you dont see
+
+==> Build and Push Docker Images
+# Login to DockerHub
+docker login -u kastrov
+
+# Build and push for each service
+# Cart Service
+docker build -t kastrov/cart-service:3 ./cart-service/
+docker push kastrov/cart-service:3
+
+# Frontend Service
+docker build -t kastrov/frontend-service:3 ./frontend-service/
+docker push kastrov/frontend-service:3
+
+# Payment Service
+docker build -t kastrov/payment-service:3 ./payment-service/
+docker push kastrov/payment-service:3
+
+# Shipping Service
+docker build -t kastrov/shipping-service:3 ./shipping-service/
+docker push kastrov/shipping-service:3
+
+# Users Service 
+docker build -t kastrov/users-service:3 ./users-service/
+docker push kastrov/users-service:3
+
+# Update your deployment files to use :3 instead of :2
+# Navigate to your manifests directory
+cd k8s-manifests
+
+# Update all deployment files at once
+sed -i 's/:2/:3/g' *-deploy.yaml
+
+# Verify the changes
+grep "image:" *-deploy.yaml
+
+
+
+==> Install AWS Load Balancer Controller
+
+eksctl utils associate-iam-oidc-provider \
+  --region ap-south-1 \
+  --cluster kastro-cluster \
+  --approve
+
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+
+aws iam create-policy \
+  --policy-name AWSLoadBalancerControllerIAMPolicy-v3 \
+  --policy-document file://iam_policy.json
+
+eksctl create iamserviceaccount \
+  --cluster kastro-cluster \
+  --namespace kube-system \
+  --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::560185625463:policy/AWSLoadBalancerControllerIAMPolicy-v3 \
+  --approve \
+  --region ap-south-1 \
+  --override-existing-serviceaccounts
+
+kubectl get sa aws-load-balancer-controller -n kube-system
+kubectl describe sa aws-load-balancer-controller -n kube-system
+
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=kastro-cluster \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region=ap-south-1
+
+# Watch pods come up
+kubectl get pods -n kube-system | grep aws-load-balancer
+
+# Should show 2/2 READY after ~30 seconds
+kubectl get deployment -n kube-system aws-load-balancer-controller
+
+==> Deploy to Kubernetes
+# 1. Create namespace (if needed - not required for this demo. All resources will get created in the 'default' namespace only)
+kubectl create namespace ecommerce
+
+# 2. Apply MySQL databases first (StatefulSets)
+kubectl apply -f k8s-manifests/mysql-cart.yaml
+kubectl apply -f k8s-manifests/mysql-payment.yaml
+kubectl apply -f k8s-manifests/mysql-shipping.yaml
+kubectl apply -f k8s-manifests/mysql-users.yaml
+
+kubectl get pvc ---> You should see the status as bound. We are seeing "bound" status because, our DB pods are created.
+kubectl get pv
+kubectl get pods ---> You should see the DB pods for each microservice
+kubectl get sc
+
+# 3. Deploy microservices
+kubectl apply -f k8s-manifests/cart-deploy.yaml
+kubectl apply -f k8s-manifests/frontend-deploy.yaml
+kubectl apply -f k8s-manifests/payment-deploy.yaml
+kubectl apply -f k8s-manifests/shipping-deploy.yaml
+kubectl apply -f k8s-manifests/users-deploy.yaml
+
+# 4. Deploy AWS ALB Ingress
+kubectl apply -f k8s-manifests/aws-alb-ingress.yaml
+
+# 5. Monitor deployment status
+kubectl get pods -w
+kubectl get svc
+kubectl get ingress
+
+====> Sub-domain Based Routing YML (AWS Load Balancer Controller)
+Phase 1 — AWS Console: Request SSL Certificate in ACM
+Go to AWS Console → Certificate Manager (ACM)
+Make sure you're in ap-south-1 (Mumbai) region
+Click "Request a certificate"
+Select "Request a public certificate" → Next
+Under "Fully qualified domain name" add these one by one:
+
+   kastrodevops.link
+   *.kastrodevops.link
+(The wildcard covers all subdomains automatically)
+6. Validation method: DNS validation
+7. Click "Request"
+8. You'll see the certificate in "Pending validation" state — click into it
+9. Click "Create records in Route 53" — AWS will auto-create the CNAME validation records
+10. Wait 2-5 minutes until status changes to "Issued"
+11. Copy the Certificate ARN — looks like:
+    arn:aws:acm:ap-south-1:560185625463:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+Phase 2 — AWS Console: Route 53 Setup
+Go to AWS Console → Route 53 → Hosted Zones
+Click on kastrodevops.link
+You'll come back here after Phase 4 to add ALB alias records — leave this open in a tab
+
+Phase 3 — Terminal: Apply subdomain-based ingress
+Replace the certificate ARN with the one you copied from ACM:
+
+k8s-manifests/ingress-subdomain.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-ingress-alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:560185625463:certificate/df6a3684-2b21-40cd-bab0-44f90ffb5869 #REPLACE-WITH-YOUR-CERT-ARN
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=60
+    alb.ingress.kubernetes.io/group.name: "ecommerce-group"
+    alb.ingress.kubernetes.io/group.order: "1"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: shop.kastrodevops.link
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+    - host: users.kastrodevops.link
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: users-service
+                port:
+                  number: 80
+    - host: cart.kastrodevops.link
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cart-service
+                port:
+                  number: 80
+    - host: shipping.kastrodevops.link
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shipping-service
+                port:
+                  number: 80
+    - host: payment.kastrodevops.link
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: payment-service
+                port:
+                  number: 80
+
+
+kubectl apply -f k8s-manifests/ingress-subdomain.yaml
+
+Watch the ALB get provisioned:
+kubectl get ingress shop-ingress-alb -w
+Wait until ADDRESS column populates:
+NAME              CLASS  HOSTS                        ADDRESS                                          PORTS
+shop-ingress-alb  alb    shop.kastrodevops.link,...   k8s-ecommercegroup-xxxx.ap-south-1.elb.amazonaws.com   80,443
+
+Copy that ALB DNS name.
+k8s-ecommercegroup-537a03c126-842518918.ap-south-1.elb.amazonaws.com
+
+Phase 4 — AWS Console: Create Route 53 Records
+Go back to your Route 53 hosted zone for kastrodevops.link and create 5 records, all identical except the subdomain name:
+For each of these subdomains: shop, users, cart, shipping, payment
+
+Click "Create record"
+Record name: shop (then repeat for others)
+Record type: A
+Toggle "Alias" → ON
+Route traffic to: Alias to Application and Classic Load Balancer
+Region: Asia Pacific (Mumbai) ap-south-1
+Load balancer: select your ALB from the dropdown (it will appear automatically)
+Click "Create records"
+
+Repeat for all 5:
+shop.kastrodevops.link     → ALB alias
+users.kastrodevops.link    → ALB alias
+cart.kastrodevops.link     → ALB alias
+shipping.kastrodevops.link → ALB alias
+payment.kastrodevops.link  → ALB alias
+
+Phase 6 — Verify everything
+# Check ingress is healthy
+kubectl get ingress shop-ingress-alb
+kubectl describe ingress shop-ingress-alb
+
+Then test in browser (DNS propagation takes 1-2 minutes):
+https://shop.kastrodevops.link      → frontend
+https://users.kastrodevops.link     → user registration
+https://cart.kastrodevops.link      → cart
+https://shipping.kastrodevops.link  → shipping
+https://payment.kastrodevops.link   → payment
+All should load over HTTPS with a valid SSL certificate and HTTP should auto-redirect to HTTPS.
+
+Summary of what happens
+Browser → https://users.kastrodevops.link
+    → Route 53 A record → ALB DNS
+    → ALB (HTTPS:443, cert validated) 
+    → users-service pod (port 5000)
+    → Flask app responds at /
+
+
+==========================
+Working with database pods
+
+When creating users in the homepage of the app, if you face any error follow as below;
+Create table for USERS service
+kubectl exec -it mysql-users-0 -- bash
+mysql -u root -p
+Password:
+password
+
+USE usersdb;
+CREATE TABLE users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(255)
+);
+SHOW TABLES;
+EXIT;
+exit
+
+Create table for CART service
+kubectl exec -it mysql-cart-0 -- bash
+mysql -u root -p
+Password: password
+USE cartdb;
+
+CREATE TABLE cart (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  item VARCHAR(255)
+);
+EXIT;
+exit
+
+Create table for SHIPPING service
+kubectl exec -it mysql-shipping-0 -- bash
+mysql -u root -p
+Password: password
+USE shippingdb;
+
+CREATE TABLE address (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  address VARCHAR(255)
+);
+EXIT;
+exit
+
+Create table for PAYMENT service
+kubectl exec -it mysql-payment-0 -- bash
+mysql -u root -p
+Password: password
+USE paymentdb;
+
+CREATE TABLE pay (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  amount VARCHAR(255)
+);
+EXIT;
+exit
+
+Access the app. Register. Add items in cart. Do payment
+
+
+How to see number of registered users & orders?
+🧑‍🤝‍🧑 Count users registered
+kubectl exec -it mysql-users-0 -- bash
+USE usersdb;
+SELECT COUNT(*) FROM users;
+SELECT * FROM users;
+
+🛒 Count total cart items added
+kubectl exec -it deploy/mysql-cart -- mysql -u root -p
+USE cartdb;
+SELECT COUNT(*) FROM cart;
+SELECT * FROM cart;
+
+🚚 Count addresses (orders shipped)
+USE shippingdb;
+SELECT COUNT(*) FROM address;
+SELECT * FROM address;
+
+💳 Count completed payments (orders)
+USE paymentdb;
+SELECT COUNT(*) FROM pay;
+SELECT * FROM pay;
+
+
+
+If you want to do any changes in the app, after doing the changes, build the image (image can be built as "latest" only, because we have given "ImagePullPolicy:Always" in all the manifest files. Or, we can give version tag for the image as well;
+🐳 REBUILD & PUSH ALL IMAGES
+docker build -t kastrov/frontend-service ./frontend-service
+docker push kastrov/frontend-service
+
+docker build -t kastrov/users-service ./users-service
+docker push kastrov/users-service
+
+docker build -t kastrov/cart-service ./cart-service
+docker push kastrov/cart-service
+
+docker build -t kastrov/shipping-service ./shipping-service
+docker push kastrov/shipping-service
+
+docker build -t kastrov/payment-service ./payment-service
+docker push kastrov/payment-service
+
+☸️ REDEPLOY APPS
+kubectl rollout restart deployment frontend-service
+kubectl rollout restart deployment users-service
+kubectl rollout restart deployment cart-service
+kubectl rollout restart deployment shipping-service
+kubectl rollout restart deployment payment-service
+
+To see the logs;
+kubectl logs deployment/users-service
+kubectl logs deployment/cart-service
+kubectl logs deployment/shipping-service
+kubectl logs deployment/payment-service
+kubectl logs deployment/frontend-service
