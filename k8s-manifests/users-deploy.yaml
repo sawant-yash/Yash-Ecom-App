@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: users-service
-          image: kastrov/users-service:2
+          image: yash5030/users-service:2
           imagePullPolicy: Always
 
           ports:
